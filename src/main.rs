@@ -1,11 +1,16 @@
+use std::collections::HashMap;
+
 use axum::{
-    Router,
-    extract::DefaultBodyLimit,
+    Json, Router,
+    extract::Request,
+    extract::{DefaultBodyLimit, Path, Query},
     http::{Method, StatusCode, header},
-    response::IntoResponse,
-    routing::get,
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
+    routing::{get, post},
 };
 use error::AppError;
+use model::{RequestData, ResponseData};
 use tower_http::cors::{Any, CorsLayer};
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
@@ -37,8 +42,8 @@ async fn main() -> Result<(), anyhow::Error> {
     // Router
     let app: Router<()> = Router::new()
         .route("/", get(ping_handler))
-        .route("/login", get(login_handler))
-        .route("/profile", get(login_handler))
+        .route("/sample/:path", post(sample_handler))
+        .layer(middleware::from_fn(sample_middleware))
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
         .layer(cors)
         .layer(DefaultBodyLimit::max(1024 * 1024 * 100)); //100MB
@@ -48,6 +53,31 @@ async fn main() -> Result<(), anyhow::Error> {
     tracing::info!("listening on http://{}", listener.local_addr()?);
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+//Middleware
+async fn sample_middleware(request: Request, next: Next) -> Result<Response, StatusCode> {
+    //preprocess
+    tracing::info!("Preprocess");
+    tracing::info!(
+        "Method: {}, URI: {}, headers: {:?}, request: {:?}",
+        request.method(),
+        request.uri(),
+        request.headers(),
+        request.body()
+    );
+    //handler
+    tracing::info!("Handler");
+    let response = next.run(request).await;
+    //postprocess
+    tracing::info!("Postprocess");
+    tracing::info!(
+        "Status: {}, headers: {:?}, request: {:?}",
+        response.status(),
+        response.headers(),
+        response.body()
+    );
+    Ok(response)
 }
 
 //Handler
@@ -66,28 +96,43 @@ pub async fn ping_handler() -> Result<impl IntoResponse, AppError> {
 
 #[utoipa::path(
     post,
-    path = "/login",
+    path = "/sample/{path}",
     tag = "Sample",
+    params(
+        ("path", Path, description = "path"),
+        ("query", Query, description = "query"),),
+    request_body(
+        description = "RequestData",
+        content = RequestData,
+    ),
     responses(
         (status = 200, description = "OK"),
         (status = 500, description = "Internal Server Error", body = ResponseError),
     ),
 )]
-pub async fn login_handler() -> Result<impl IntoResponse + Send, AppError> {
-    Ok((StatusCode::OK, ()).into_response())
-}
-
-#[utoipa::path(
-    post,
-    path = "/profile",
-    tag = "Sample",
-    responses(
-        (status = 200, description = "OK"),
-        (status = 500, description = "Internal Server Error", body = ResponseError),
-    ),
-)]
-pub async fn profile_handler() -> Result<impl IntoResponse + Send, AppError> {
-    Ok((StatusCode::OK, ()).into_response())
+pub async fn sample_handler(
+    Path(path): Path<i32>,
+    Query(query): Query<HashMap<String, String>>,
+    Json(body): Json<RequestData>,
+) -> Result<impl IntoResponse + Send, AppError> {
+    let query = match query.get("query") {
+        Some(query) => query,
+        None => "",
+    };
+    tracing::info!(
+        "path: {}, query: {}, body: {{ name: {}, message: {} }}",
+        path,
+        query,
+        body.name,
+        body.message
+    );
+    let result: ResponseData = ResponseData {
+        message: format!(
+            "path: {}, query: {}, body: {{ name: {}, message: {} }}",
+            path, query, body.name, body.message
+        ),
+    };
+    Ok((StatusCode::OK, Json(result)).into_response())
 }
 
 #[derive(OpenApi)]
@@ -112,11 +157,11 @@ pub async fn profile_handler() -> Result<impl IntoResponse + Send, AppError> {
     ),
     paths(
         crate::ping_handler,
-        crate::login_handler,
-        crate::profile_handler,
+        crate::sample_handler,
     ),
     components(schemas(
         crate::error::ResponseError,
+        crate::model::RequestData,
     ))
 )]
 struct ApiDoc;
